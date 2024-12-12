@@ -1,0 +1,29 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.js
+.yarn/install-state.gz
+
+
+#backend 
+__pycache__
+config/__pycache__
+config/__init__.py
+models/__pycache__
+schema/__pycache__
+services/__pycache__
+.env
+
+
+# misc
+.DS_Store
+*.pem
+
+
+# local env files
+.env*.local
+.idea
+.ipyb_checkpoints
+.pytest_cache
