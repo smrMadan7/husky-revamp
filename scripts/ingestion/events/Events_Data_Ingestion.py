@@ -1,6 +1,6 @@
 import asyncio
 import pandas as pd
-from langchain_community.document_loaders import WebBaseLoader,Docx2txtLoader,UnstructuredHTMLLoader
+from langchain_community.document_loaders import WebBaseLoader, Docx2txtLoader, UnstructuredHTMLLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
@@ -14,13 +14,18 @@ from groq import Groq
 from datetime import datetime
 import requests
 from langchain_qdrant import FastEmbedSparse, RetrievalMode
+from logger_configuration import logger
 
+
+# Load environment variables
 load_dotenv()
 
 GROQ_API_KEY = os.getenv('GROQ_API_KEY')
 openai_api_key = os.getenv("OPENAI_API_KEY")
 api_key = os.getenv("QDRANT_KEY")
 url = os.getenv('QDRANT_URL')
+
+# Initialize Qdrant client
 qdrant_client = QdrantClient(
     url=url,
     api_key=api_key,
@@ -28,48 +33,49 @@ qdrant_client = QdrantClient(
 
 
 def find_event_date(context):
-    client = Groq()
-    chat_completion = client.chat.completions.create(
-    messages=[
-        {
-            "role": "system",
-            "content": "Identify and provide only the event start date mentioned in the context. If an event date is explicitly mentioned, provide only that date. "
-                       "If no event date is mentioned, extract and provide only the first occurring date in the context. "
-                       "If there are multiple dates provide only the first occuring date"
-                       "Respond with the date alone in 'Month Day' or 'Month Day' format without any additional text."
-                       "If Month is in abbreviated from please expand and provide the response"
-                       "Example Oct 5 should be October 5"
-        },
-        {
-            "role": "user",
-            "content": context,
-        }
-    ],
-    model="gemma2-9b-it",
-    temperature=0.01,
-    max_tokens=7000,
-    top_p=1,
-    stop=None,
-    stream=False,
-)
+    try:
+        client = Groq()
+        chat_completion = client.chat.completions.create(
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Identify and provide only the event start date mentioned in the context. "
+                               "If an event date is explicitly mentioned, provide only that date. "
+                               "If no event date is mentioned, extract and provide only the first occurring date in the context. "
+                               "If there are multiple dates provide only the first occurring date. "
+                               "Respond with the date alone in 'Month Day' or 'Month Day' format without any additional text. "
+                               "Expand abbreviated months like Oct to October."
+                },
+                {
+                    "role": "user",
+                    "content": context,
+                }
+            ],
+            model="gemma2-9b-it",
+            temperature=0.01,
+            max_tokens=7000,
+            top_p=1,
+            stop=None,
+            stream=False,
+        )
+        return chat_completion.choices[0].message.content.strip()
+    except Exception as e:
+        logger.error(f"Error in find_event_date: {e}")
+        return None
 
-    # Print the completion returned by the LLM.
-    print(chat_completion.choices[0].message.content)
-    return chat_completion.choices[0].message.content
-
-
-
-from datetime import datetime
 
 def convert_to_yyyy_mm_dd(date_string):
     # Remove any leading/trailing whitespace from the date string
     date_string = date_string.strip()
 
+    # Handle February 29 explicitly
     if date_string == 'February 29':
         date_string = "February 28 2024"
         parsed_date = datetime.strptime(date_string, "%B %d %Y")
-        formatted_date = parsed_date.strftime("%Y-%m-%d")
-        return formatted_date
+        return parsed_date.strftime("%Y-%m-%d")
+
+    # Remove ordinal indicators (st, nd, rd, th) using regex
+    date_string = re.sub(r'(\d+)(st|nd|rd|th)', r'\1', date_string)
 
     # Define possible date formats, including "30 April" format
     date_formats = ["%B %d, %Y", "%B %d", "%d %B, %Y", "%d %B", "%B", "%B %d %Y", "%B %Y"]
@@ -89,61 +95,67 @@ def convert_to_yyyy_mm_dd(date_string):
             return parsed_date.strftime("%Y-%m-%d")
         except ValueError:
             continue
+
     # Raise an error if no format matches
     raise ValueError(f"Date format for '{date_string}' not recognized.")
 
 
 
-def read_urls(urls):
-    nest_asyncio.apply()
-    loader = WebBaseLoader(urls)
-    loader.requests_per_second = 1
-    data = loader.aload()  # Await the coroutine
-    return data
 
-def create_collection_if_not_exists(collection_name):
-    if not qdrant_client.collection_exists(collection_name=collection_name):
-        # Specify the dimensions of your embeddings
-        dimensions = 384  # Update this to match the embedding model you're using
-        qdrant_client.create_collection(
-            collection_name=collection_name,
-            vector_size=dimensions,  # Vector size based on your model
-            distance="Cosine"  # Or another distance metric, e.g., "Euclidean"
-        )
-        print(f"Collection '{collection_name}' created.")
-    else:
-        print(f"Collection '{collection_name}' already exists.")
+def read_urls(urls):
+    try:
+        nest_asyncio.apply()
+        loader = WebBaseLoader(urls,continue_on_failure=True)
+        loader.requests_per_second = 1
+        return loader.aload()
+    except Exception as e:
+        logger.error(f"Error in read_urls: {e}")
+        return []
+
+
+def create_collection_if_not_exists(collection_name, dimensions=384):
+    try:
+        if not qdrant_client.collection_exists(collection_name=collection_name):
+            qdrant_client.create_collection(
+                collection_name=collection_name,
+                vector_size=dimensions,
+                distance="Cosine"
+            )
+            logger.info(f"Collection '{collection_name}' created.")
+        else:
+            logger.info(f"Collection '{collection_name}' already exists.")
+    except Exception as e:
+        logger.error(f"Error in create_collection_if_not_exists: {e}")
 
 
 async def create_vector_qdrant(docs):
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1024, chunk_overlap=100)
-    texts = text_splitter.split_documents(docs)
-    # embeddings = HuggingFaceEmbeddings(model_name="jinaai/jina-embeddings-v2-small-en", model_kwargs={'device': 'cpu'})
-    embeddings = OpenAIEmbeddings(model="text-embedding-3-large", api_key=openai_api_key)
-    sparse_embeddings = FastEmbedSparse(model_name="Qdrant/BM25")
+    try:
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1024, chunk_overlap=100)
+        texts = text_splitter.split_documents(docs)
+        embeddings = OpenAIEmbeddings(model="text-embedding-3-large", api_key=openai_api_key)
+        sparse_embeddings = FastEmbedSparse(model_name="Qdrant/BM25")
 
-    qdrant = QdrantVectorStore.from_documents(
-        texts,
-        embedding=embeddings,
-        sparse_embedding=sparse_embeddings,
-        url=url,
-        api_key=api_key,
-        collection_name="Events_OpenAI",
-        retrieval_mode=RetrievalMode.HYBRID,
-        timeout=90
-    )
-    print("Dumped successfully...")
-    return qdrant
+        QdrantVectorStore.from_documents(
+            texts,
+            embedding=embeddings,
+            sparse_embedding=sparse_embeddings,
+            url=url,
+            api_key=api_key,
+            collection_name="events",
+            retrieval_mode=RetrievalMode.HYBRID,
+            timeout=90
+        )
+        logger.info("Documents dumped to Qdrant successfully.")
+    except Exception as e:
+        logger.error(f"Error in create_vector_qdrant: {e}")
 
 
 def data_cleaning(docs):
-    for doc in docs:
-        print(doc.metadata['source'])
-        print("oooooooooooooo")
-        doc.page_content = doc.page_content.replace('\n', '')
-        doc.page_content = re.sub(r'[",\\]', '', doc.page_content)
-        doc.page_content = re.sub(r"[\"']", '', doc.page_content)
-        doc.page_content = re.sub(r'\s+', ' ', doc.page_content).strip()
+    try:
+        for doc in docs:
+            doc.page_content = re.sub(r'[",\\]', '', doc.page_content.replace('\n', ''))
+            doc.page_content = re.sub(r"[\"']", '', doc.page_content)
+            doc.page_content = re.sub(r'\s+', ' ', doc.page_content).strip()
 
 
         if "lu.ma" in doc.metadata['source']:
@@ -214,48 +226,56 @@ def data_cleaning(docs):
             date=convert_to_yyyy_mm_dd(date)
             print(date)
             doc.metadata['event_date']=date
-
-    return docs
+    except Exception as e:
+        logger.error(f"Error in data_cleaning: {e}")
+        return []
 
 def read_libp2p_docs(folder_path):
-    docx_files = [f for f in os.listdir(folder_path) if f.endswith('.docx')]
-    documents = []
-    for file in docx_files:
-        file_path = os.path.join(folder_path, file)
-        # Load each .docx file using Docx2TxtLoader
-        loader = Docx2txtLoader(file_path)
-        documents.extend(loader.load())
-    return documents
+    try:
+        docx_files = [f for f in os.listdir(folder_path) if f.endswith('.docx')]
+        documents = []
+        for file in docx_files:
+            loader = Docx2txtLoader(os.path.join(folder_path, file))
+            documents.extend(loader.load())
+        return documents
+    except Exception as e:
+        logger.error(f"Error in read_libp2p_docs: {e}")
+        return []
+
 
 def read_ipfs_docs(folder_path):
-    docx_files = [f for f in os.listdir(folder_path) if f.endswith('.html')]
-    documents = []
-    for file in docx_files:
-        file_path = os.path.join(folder_path, file)
-        loader = UnstructuredHTMLLoader(file_path)
-        documents.extend(loader.load())
-    print(documents[0].page_content)
-    return documents
-
-
+    try:
+        html_files = [f for f in os.listdir(folder_path) if f.endswith('.html')]
+        documents = []
+        for file in html_files:
+            loader = UnstructuredHTMLLoader(os.path.join(folder_path, file))
+            documents.extend(loader.load())
+        return documents
+    except Exception as e:
+        logger.error(f"Error in read_ipfs_docs: {e}")
+        return []
 
 
 async def main():
-    df = pd.read_csv('./Data/Events/Event_Urls_Without_Luma.csv')
-    urls = df['Event_Urls'].values.tolist()
-    urls=list(set(urls))
-    luma_urls=[event for event in urls if "lu.ma" in event]
-    filtered_urls = [event for event in urls if "docs.google" not in event and "lu.ma" not in event]
-    docs = read_urls(filtered_urls)
-    docs1=read_urls(luma_urls)
-    documents1 = data_cleaning(docs1)
-    documents = data_cleaning(docs)
-    libp2p_meeting_docs=read_libp2p_docs('/home/ubuntu/Downloads/husky-be-v1/Data/Events/libp2p_meeting_notes')
-    libp2p_docs=data_cleaning(libp2p_meeting_docs)
-    ipfs_meeting_docs=read_ipfs_docs('/home/ubuntu/Downloads/husky-be-v1/Data/Events/ipfs_meeting_notes')
-    ipfs_docs=data_cleaning(ipfs_meeting_docs)
-    all_docs=ipfs_docs+libp2p_docs+documents1+documents
-    qdrant = await create_vector_qdrant(all_docs)
+    try:
+        df = pd.read_csv('./Data/Events/Event_Urls_Without_Luma.csv')
+        urls = list(set(df['Event_Urls'].values.tolist()))
+        luma_urls = [url for url in urls if "lu.ma" in url]
+        filtered_urls = [url for url in urls if "docs.google" not in url and "lu.ma" not in url]
+
+        docs = read_urls(filtered_urls)
+        luma_docs = read_urls(luma_urls)
+
+        all_docs = data_cleaning(docs + luma_docs)
+
+        libp2p_docs = data_cleaning(read_libp2p_docs('/home/ubuntu/Downloads/husky-be-v1/Data/Events/libp2p_meeting_notes'))
+        ipfs_docs = data_cleaning(read_ipfs_docs('/home/ubuntu/Downloads/husky-be-v1/Data/Events/ipfs_meeting_notes'))
+
+        all_docs.extend(libp2p_docs + ipfs_docs)
+
+        await create_vector_qdrant(all_docs)
+    except Exception as e:
+        logger.error(f"Error in main: {e}")
 
 
 if __name__ == "__main__":

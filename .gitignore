@@ -16,6 +16,7 @@ schema/__pycache__
 services/__pycache__
 .env
 
+logs/
 
 # misc
 .DS_Store

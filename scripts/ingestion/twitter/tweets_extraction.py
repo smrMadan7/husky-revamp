@@ -20,7 +20,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 load_dotenv()
 TWITTER_AUTH_TOKEN = os.getenv("TWITTER_AUTH_TOKEN")
-
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
 
 class TwitterExtractor:
     def __init__(self, member_name, folder_path, headless=True):
@@ -49,7 +50,10 @@ class TwitterExtractor:
         """
         options = Options()
         options.headless = headless
-        driver = webdriver.Chrome(options=options)
+
+        # Automatically manage ChromeDriver
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=options)
         driver.get("https://twitter.com")
         return driver
 
@@ -116,6 +120,9 @@ class TwitterExtractor:
                 self._save_to_json(row, filename=f"{cur_filename}.json")
                 logger.info(f"Saving tweets...\n{row['date']},  {row['author_name']} -- {row['text'][:50]}...\n\n")
                 self._delete_first_tweet()
+                
+                time.sleep(10)
+
             self._save_to_excel(json_filename=f"{cur_filename}.json", output_filename=f"{cur_filename}.xlsx")
             self.fix_json_file(filename=f"{cur_filename}.json", output_filename=f"{cur_filename}.json")
         except TimeoutException:
@@ -599,11 +606,10 @@ if __name__ == "__main__":
     parser = ArgumentParser(description="Extract Twitter data for teams")
     parser.add_argument("--input_file_path", help="Path to the CSV file containing team twitter handles")
     parser.add_argument("--output_folder", help="Output folder to save team CSV files")
-    parser.add_argument("--start_date", type=str, default="2024-07-01",
-                        help="Start date for fetching tweets (YYYY-MM-DD)")
-    parser.add_argument("--end_date", type=str, default="2024-10-24", help="End date for fetching tweets (YYYY-MM-DD)")
+    parser.add_argument("--start_date",required=True, type=str, help="Start date for fetching tweets (YYYY-MM-DD)")
+    parser.add_argument("--end_date",required=True, type=str, help="End date for fetching tweets (YYYY-MM-DD)")
     args = parser.parse_args()
     main(args)
 
 #run the code using the similar command as shown below. python script.py input file path output folder path start date and end date
-# python tweets_extraction.py --input_file_path /home/ubuntu/Downloads/husky-be-v1/Data/Twitter_Teams.csv --output_folder /home/ubuntu/Downloads/husky-be-v1/Data/temp_twitter --start_date 2024-07-01 --end_date 2024-10-24
+# python3 tweets_extraction.py --input_file_path /home/ubuntu/Documents/PLN/husky-pipelines/Data/Twitter_Teams.csv --output_folder /home/ubuntu/Documents/PLN/husky-pipelines/Data/twitter-extraction --start_date 2024-10-01 --end_date 2024-12-24
